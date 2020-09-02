@@ -75,3 +75,5 @@ df$quant <- factor(findInterval(df$x,quantiles))
 ggplot(df, aes(x,y)) + geom_line() + geom_ribbon(aes(ymin=0, ymax=y, fill=quant)) + 
   scale_x_continuous(breaks=quantiles) + scale_fill_brewer(guide="none")
 
+  #hola perroni
+
