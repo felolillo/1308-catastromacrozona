@@ -1,0 +1,642 @@
+//Script de Generación de Mosaicos en GEE, pixel-a-pixel
+//Desarrollado por el equipo SIMEF
+
+/*
+ Se combinan dos procesamientos
+
+  1. Funcion para enmascarar pixeles usando banda pixel_qa de Landsat 8, y
+  2. Relleno de pixeles, adaptado de (Mateo-Garcia et al 2018).
+     */
+
+
+// -------------------------------------------------------
+
+//                    Definir variables
+
+// [Primer Paso]
+// 1. Definir variables
+var periodo = "_T0";            // No modificar
+var nameReg = RM;           // Definir region de estudio  /  Polígono reg
+var var_reg = "RM";         // Definir region
+var var_platform = "Landsat_8";  // No modificar
+
+// Polígono Test
+var reg = nameReg.geometry();
+
+var geoArea = reg.area(1).divide(100 * 100);      //en Hectáreas
+print("Superficie polígono ingresado (ha) T0",geoArea);
+
+// 2. Definir fecha estudio.
+var var_T0start = '2013-10-01';                                          
+var var_T0end = '2014-03-31'; 
+//
+
+
+// [Segundo Paso]
+// 3. Definir fechas para correccion por nubes (cloud filling) 
+var Filter1 = ee.Filter.date('2013-10-01',var_T0start);   // Fecha hacia atrás desde T0start
+var Filter2 = ee.Filter.date(var_T0end,'2014-03-31');     // Fecha hacia adelante desde T0end
+var allSeasonsFilter = ee.Filter.or(Filter1,Filter2);     //   Create joint Filter
+
+
+
+//                  Fin definir variables
+// -------------------------------------------------------
+
+//            No modificar nada luego de esta linea
+
+// -------------------------------------------------------
+
+//print ('reg', reg);
+// Set study area as mapa center.
+Map.centerObject(reg,9);
+Map.addLayer(reg, {color: 'FF0000'}, var_reg);
+
+ 
+///////////////////////////////
+//////////Máscara
+//////////////////////////////
+
+var maskL8sr = function(image){
+    var radsat_qa = image.select('radsat_qa');
+    var qa = image.select('pixel_qa');
+    
+
+    // pixeles saturados  // Comentar esta parte en Lanquihue y Palena, y/o dónde existan problemas 
+                          // de confusión entre nieve y nube, ya que afecta en las ha's que calcula como 
+                          // nube. Si se comenta se debe documentar en Observacaciones en la Tabla de metadata.
+                          
+    var satPixel = radsat_qa.bitwiseAnd(1 << 1)    //saturate band 1
+            .or(radsat_qa.bitwiseAnd(1 << 2))      //saturate band 2
+            .or(radsat_qa.bitwiseAnd(1 << 3))      //saturate band 3
+            .or(radsat_qa.bitwiseAnd(1 << 4))      //saturate band 4
+            .or(radsat_qa.bitwiseAnd(1 << 5))      //saturate band 5
+            .or(radsat_qa.bitwiseAnd(1 << 6))      //saturate band 6
+            .or(radsat_qa.bitwiseAnd(1 << 7));      //saturate band 7
+      image = image.updateMask(satPixel.not());
+    
+    // nubes y sombras        
+    // nubes
+    var cloudPixel = qa.bitwiseAnd(1 << 5)  //cloud bit
+                    .and(qa.bitwiseAnd(1 << 6))
+                    .or(qa.bitwiseAnd(1 << 7));
+                    //.and(qa.bitwiseAnd(2 << 6))
+                    //.or(qa.bitwiseAnd(2 << 7))
+                    //.and(qa.bitwiseAnd(3 << 6))
+                    //.or(qa.bitwiseAnd(3 << 7));
+    image = image.updateMask(cloudPixel.not());
+    
+    // sombras
+
+  var shadowPixel = qa.bitwiseAnd(1 << 3);    //shadow
+
+  return image.updateMask(shadowPixel.not())//.divide(10000)
+      .select("B[0-9]*")
+      .addBands (image.normalizedDifference (['B4', 'B3']).rename ('ndvi'))  // Aca se agrega la banda NDVI
+                                                                             // para usarla en el composite
+      .copyProperties(image, ["system:time_start","CLOUD_COVER_LAND"]);
+  };
+
+
+
+
+// ----- Creacion de mosaico -----
+
+var T0start = var_T0start;
+var T0end = var_T0end;
+
+// Colecciones - Surface Reflectance - Aplica filtro por pixel
+var collectionT0 = ee.ImageCollection("LANDSAT/LC08/C01/T1_SR")
+    // .merge(ee.ImageCollection("LANDSAT/LT05/C01/T1_SR"))      // Comentar para T1
+    .filterDate(T0start, T0end)
+    .filterBounds(reg)
+    .map(maskL8sr);
+
+
+// Compositing and Mosaicking
+var compositeT0md = collectionT0.median();
+var compositeClipT0md = compositeT0md.clip(reg);
+
+// var compositeT0md = collectionT0.qualityMosaic('ndvi');       // Usa NDVI para filtrar el mayor valor
+//                                                               // de este forma se reducen las costras de nubes
+//                                                               // que se generaban al usar .median()
+// var compositeClipT0md = compositeT0md.clip(reg);
+
+
+// SELECCIONAR BANDAS - f = final
+// A
+var compositeClipT0mdf = compositeClipT0md.select("B1","B2","B3","B4","B5","B7");
+
+  var visParams = {
+                    bands: ['B3', 'B2', 'B1'],
+                    min: 0,
+                    max: 3000,
+                    gamma: 1.4,
+                    };
+                    
+  Map.addLayer(compositeClipT0mdf, visParams, 'Mosaico sin corrección');
+
+
+// // Si hay problemas de Computation timed out: activar siguiente seccion
+
+// // // GUARDAR A DRIVE
+
+// // var var_filtros = "_MF"; // MF: Median Filter ; CF: Cloud Filling
+// // var var_descripcion = ee.String(var_platform).cat(var_reg).cat(periodo).cat(var_filtros).getInfo();
+// // print ('Descripcion', var_descripcion);
+// // print('Superficie con nubes: ', 'menor a 0.09', 'Hectáreas');
+
+// // Export.image.toDrive({
+// //   image: compositeClipT0mdf,
+// //   description:var_descripcion,
+// //   scale:30,
+// //   crs: "EPSG: 32718",
+// //   region:reg,
+// //   maxPixels: 7e10,
+// //   skipEmptyTiles: true
+// // });
+
+
+
+// ********************************
+//          Cloud filling
+// ********************************
+
+// //----- Seleccionar pixeles con valor "masked" ----- 
+
+// // Asignar valor -9999 a pixeles 'masked'
+var datamasked = compositeClipT0mdf.unmask(-9999);
+
+// // Create a binary mask.
+var mask = datamasked.select('B1').eq(-9999);
+
+// // Make a handy variable of visualization parameters.
+var visParams = {bands: ['B1'], max: 1};
+var maskedPixels = compositeClipT0mdf.select('B1').eq(mask);
+var count = mask.min(datamasked);
+//Map.addLayer(mask, visParams, 'Pixeles No Data');
+
+// // Mask "cold" pixels.
+mask = mask.updateMask(mask);
+// print ("Pixeles no data",mask);
+// Map.addLayer(mask, {palette: 'FF0000'}, 'Pixeles sin informacion');
+
+// // ----- Superficie cubierta por nubes ----- //
+var superficie = mask.multiply(ee.Image.pixelArea().divide(10000)); // 'divide' para obtener valores por hectarea
+var area_ha = superficie.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: reg,
+  scale: 30.0,
+  maxPixels: 1e10
+});
+var area_ha = ee.Number(area_ha.get('B1'));
+//print("area_ha", area_ha);
+
+
+// ----- Convertir a poligonos -----
+
+// Convert the zones to vectors.
+var vectors = mask.addBands(mask).reduceToVectors({
+  geometry: reg,
+  crs: compositeClipT0md.projection(),
+  scale: 30,
+  geometryType: 'polygon',
+  eightConnected: false,
+  maxPixels:1e10, 
+  labelProperty: 'Sin Informacion',
+  reducer: ee.Reducer.mean()
+});
+
+// Export the FeatureCollection to a KML file.
+//Export.table.toDrive({
+//  collection: vectors,
+//  description:'vectorsToDriveExample',
+//  fileFormat: 'KML'
+//});
+
+
+// ----- Crear buffer para los poligonos sin informacion -----
+
+// Create a function for Buffering a feature, using the buffer_size
+// property of the feature.
+var BufferFeature = function(f) {
+  f = ee.Feature(f);
+  var buffer_size = f.get('buffer_size');
+  return f.buffer(buffer_size);   
+};
+
+var BufferFeaturesByDistance = function (fc, buffer_size) {
+
+  // Set a buffer_size property on a feature. Note that this function needs
+  // to be defined within the BufferFeaturesByDistance function, so it can
+  // make use of the buffer_size parameter.
+  var SetBufferSize = function(f) {
+    return f.set({'buffer_size': buffer_size});
+  };
+
+  return vectors.map(SetBufferSize).map(BufferFeature);
+};
+
+var buffered = BufferFeaturesByDistance(vectors, 20);
+var buffered1 = buffered.union();
+
+// ----- Evaluar si mosaico presenta "masked" pixels -----
+
+var tamano = buffered.size();
+var cond1 = tamano.getInfo();
+
+
+if (cond1 === 0) { // Abre condicion if
+
+// i) Si no presenta pixeles "masked" o sin informacion -> GUARDAR A DRIVE
+// GUARDAR A DRIVE
+
+var var_filtros = "_MF"; // MF: Median Filter ; CF: Cloud Filling
+var var_descripcion = ee.String(var_platform).cat(ee.String(var_reg)).cat(ee.String(periodo)).cat(ee.String(var_filtros)).getInfo();
+
+print ('Descripcion', var_descripcion);
+print('Superficie con nubes: ', 'menor a 0.09', 'Hectáreas');
+
+Export.image.toDrive({
+  image: compositeClipT0mdf,
+  description:'L7_Region_T0',
+  scale:30,
+  crs: "EPSG: 32718",
+  //crs: "EPSG: 4326", // Si al exportar el mosaico existe un bandeo vertical probar exportando con este EPSG.
+  region:reg,
+  maxPixels: 7e10,
+  skipEmptyTiles: true
+});
+
+
+// ii) Si presenta pixeles "masked" o sin informacion -> continuar con script
+
+}else{
+
+Export.image.toDrive({
+  image: compositeClipT0mdf,
+  description:'L7_Region_T0',
+  scale:30,
+  crs: "EPSG: 32718",
+  //crs: "EPSG: 4326", // Si al exportar el mosaico existe un bandeo vertical probar exportando con este EPSG.
+  region:reg,
+  maxPixels: 7e10,
+  skipEmptyTiles: true
+
+
+});
+
+print('Superficie cubierta por nubes T0: ', area_ha, 'Hectáreas');
+print('% cubierto por nubes T0: ',  area_ha.divide(geoArea).multiply(100), 'Hectáreas');
+
+
+
+}   
+
+//Cálculo ndvi y nbr T0
+
+ var ndvi1= compositeClipT0mdf.normalizedDifference (['B5', 'B4']);
+ var nbr1 = compositeClipT0mdf.normalizedDifference(['B5','B7']);
+
+
+// -------------------------------------------------------
+
+//                    Definir variables
+
+// [Primer Paso]
+// 1. Definir variables
+var periodo2 = "_T1";            // No modificar
+var nameReg2 = RM;           // Definir region de estudio  /  Polígono reg
+var var_reg2 = "RM";         // Definir region
+var var_platform2 = "Landsat_8";  // No modificar
+
+// Polígono Test
+var reg2 = nameReg2.geometry();
+
+var geoArea2 = reg2.area(1).divide(100 * 100);      //en Hectáreas
+print("Superficie polígono ingresado (ha) T1",geoArea2);
+
+// 2. Definir fecha estudio.
+var var_T0start2 = '2019-10-01';                                          
+var var_T0end2 = '2020-03-01'; 
+//
+
+
+// [Segundo Paso]
+// 3. Definir fechas para correccion por nubes (cloud filling) 
+var Filter12 = ee.Filter.date('2019-10-01',var_T0start2);   // Fecha hacia atrás desde T0start
+var Filter22 = ee.Filter.date(var_T0end2,'2020-03-01');     // Fecha hacia adelante desde T0end
+var allSeasonsFilter2 = ee.Filter.or(Filter12,Filter22);     //   Create joint Filter
+
+
+
+//                  Fin definir variables
+// -------------------------------------------------------
+
+//            No modificar nada luego de esta linea
+
+// -------------------------------------------------------
+
+//print ('reg', reg);
+// Set study area as mapa center.
+Map.centerObject(reg2,9);
+Map.addLayer(reg2, {color: 'FF0000'}, var_reg2);
+
+
+///////////////////////////////
+//////////Máscara
+//////////////////////////////
+
+var maskL8sr2 = function(image){
+    var radsat_qa2 = image.select('radsat_qa');
+    var qa2 = image.select('pixel_qa');
+    
+
+    // pixeles saturados  // Comentar esta parte en Lanquihue y Palena, y/o dónde existan problemas 
+                          // de confusión entre nieve y nube, ya que afecta en las ha's que calcula como 
+                          // nube. Si se comenta se debe documentar en Observacaciones en la Tabla de metadata.
+                          
+    var satPixel2 = radsat_qa2.bitwiseAnd(1 << 1)    //saturate band 1
+            .or(radsat_qa2.bitwiseAnd(1 << 2))      //saturate band 2
+            .or(radsat_qa2.bitwiseAnd(1 << 3))      //saturate band 3
+            .or(radsat_qa2.bitwiseAnd(1 << 4))      //saturate band 4
+            .or(radsat_qa2.bitwiseAnd(1 << 5))      //saturate band 5
+            .or(radsat_qa2.bitwiseAnd(1 << 6))      //saturate band 6
+            .or(radsat_qa2.bitwiseAnd(1 << 7));      //saturate band 7
+      image = image.updateMask(satPixel2.not());
+    
+    // nubes y sombras        
+    // nubes
+    var cloudPixel2 = qa2.bitwiseAnd(1 << 5)  //cloud bit
+                    .and(qa2.bitwiseAnd(1 << 6))
+                    .or(qa2.bitwiseAnd(1 << 7));
+                    //.and(qa.bitwiseAnd(2 << 6))
+                    //.or(qa.bitwiseAnd(2 << 7))
+                    //.and(qa.bitwiseAnd(3 << 6))
+                    //.or(qa.bitwiseAnd(3 << 7));
+    image = image.updateMask(cloudPixel2.not());
+    
+    // sombras
+
+  var shadowPixel2 = qa2.bitwiseAnd(1 << 3);    //shadow
+
+  return image.updateMask(shadowPixel2.not())//.divide(10000)
+      .select("B[0-9]*")
+      .addBands (image.normalizedDifference (['B4', 'B3']).rename ('ndvi'))  // Aca se agrega la banda NDVI
+                                                                             // para usarla en el composite
+      .copyProperties(image, ["system:time_start","CLOUD_COVER_LAND"]);
+  };
+
+
+
+
+// ----- Creacion de mosaico -----
+
+var T0start2 = var_T0start2;
+var T0end2 = var_T0end2;
+
+// Colecciones - Surface Reflectance - Aplica filtro por pixel
+var collectionT02 = ee.ImageCollection("LANDSAT/LC08/C01/T1_SR")
+    // .merge(ee.ImageCollection("LANDSAT/LT05/C01/T1_SR"))      // Comentar para T1
+    .filterDate(T0start2, T0end2)
+    .filterBounds(reg2)
+    .map(maskL8sr2);
+
+
+// Compositing and Mosaicking
+var compositeT0md2 = collectionT02.median();
+var compositeClipT0md2 = compositeT0md2.clip(reg);
+
+// var compositeT0md2 = collectionT02.qualityMosaic('ndvi');       // Usa NDVI para filtrar el mayor valor
+//                                                               // de este forma se reducen las costras de nubes
+//                                                               // que se generaban al usar .median()
+// var compositeClipT0md2 = compositeT0md2.clip(reg2);
+
+
+// SELECCIONAR BANDAS - f = final
+// A
+var compositeClipT0mdf2 = compositeClipT0md2.select("B1","B2","B3","B4","B5","B7");
+
+  var visParams = {
+                    bands: ['B3', 'B2', 'B1'],
+                    min: 0,
+                    max: 3000,
+                    gamma: 1.4,
+                    };
+                    
+  Map.addLayer(compositeClipT0mdf2, visParams, 'Mosaico sin corrección2');
+
+
+// // Si hay problemas de Computation timed out: activar siguiente seccion
+
+// // // GUARDAR A DRIVE
+
+// // var var_filtros = "_MF"; // MF: Median Filter ; CF: Cloud Filling
+// // var var_descripcion = ee.String(var_platform).cat(var_reg).cat(periodo).cat(var_filtros).getInfo();
+// // print ('Descripcion', var_descripcion);
+// // print('Superficie con nubes: ', 'menor a 0.09', 'Hectáreas');
+
+// // Export.image.toDrive({
+// //   image: compositeClipT0mdf,
+// //   description:var_descripcion,
+// //   scale:30,
+// //   crs: "EPSG: 32718",
+// //   region:reg,
+// //   maxPixels: 7e10,
+// //   skipEmptyTiles: true
+// // });
+
+
+
+// ********************************
+//          Cloud filling
+// ********************************
+
+// //----- Seleccionar pixeles con valor "masked" ----- 
+
+// // Asignar valor -9999 a pixeles 'masked'
+var datamasked2 = compositeClipT0mdf2.unmask(-9999);
+
+// // Create a binary mask.
+var mask2 = datamasked2.select('B1').eq(-9999);
+
+// // Make a handy variable of visualization parameters.
+var visParams2 = {bands: ['B1'], max: 1};
+var maskedPixels2 = compositeClipT0mdf2.select('B1').eq(mask2);
+var count2 = mask2.min(datamasked2);
+//Map.addLayer(mask, visParams, 'Pixeles No Data');
+
+// // Mask "cold" pixels.
+mask2 = mask2.updateMask(mask2);
+// print ("Pixeles no data",mask);
+// Map.addLayer(mask, {palette: 'FF0000'}, 'Pixeles sin informacion');
+
+// // ----- Superficie cubierta por nubes ----- //
+var superficie2 = mask2.multiply(ee.Image.pixelArea().divide(10000)); // 'divide' para obtener valores por hectarea
+var area_ha2 = superficie2.reduceRegion({
+  reducer: ee.Reducer.sum(),
+  geometry: reg2,
+  scale: 30.0,
+  maxPixels: 1e10
+});
+var area_ha2 = ee.Number(area_ha2.get('B1'));
+//print("area_ha", area_ha);
+
+
+// ----- Convertir a poligonos -----
+
+// Convert the zones to vectors.
+var vectors2 = mask2.addBands(mask2).reduceToVectors({
+  geometry: reg2,
+  crs: compositeClipT0md2.projection(),
+  scale: 30,
+  geometryType: 'polygon',
+  eightConnected: false,
+  maxPixels:1e10, 
+  labelProperty: 'Sin Informacion',
+  reducer: ee.Reducer.mean()
+});
+
+// Export the FeatureCollection to a KML file.
+//Export.table.toDrive({
+//  collection: vectors,
+//  description:'vectorsToDriveExample',
+//  fileFormat: 'KML'
+//});
+
+
+// ----- Crear buffer para los poligonos sin informacion -----
+
+// Create a function for Buffering a feature, using the buffer_size
+// property of the feature.
+var BufferFeature2 = function(f) {
+  f = ee.Feature(f);
+  var buffer_size2 = f.get('buffer_size');
+  return f.buffer(buffer_size2);   
+};
+
+var BufferFeaturesByDistance2 = function (fc, buffer_size2) {
+
+  // Set a buffer_size property on a feature. Note that this function needs
+  // to be defined within the BufferFeaturesByDistance function, so it can
+  // make use of the buffer_size parameter.
+  var SetBufferSize2 = function(f) {
+    return f.set({'buffer_size2': buffer_size2});
+  };
+
+  return vectors2.map(SetBufferSize2).map(BufferFeature2);
+};
+
+var buffered2 = BufferFeaturesByDistance2(vectors2, 20);
+var buffered12 = buffered2.union();
+
+// ----- Evaluar si mosaico presenta "masked" pixels -----
+
+var tamano2 = buffered2.size();
+var cond12 = tamano2.getInfo();
+
+
+if (cond12 === 0) { // Abre condicion if
+
+// i) Si no presenta pixeles "masked" o sin informacion -> GUARDAR A DRIVE
+// GUARDAR A DRIVE
+
+var var_filtros2 = "_MF2"; // MF: Median Filter ; CF: Cloud Filling
+var var_descripcion2 =ee.String(var_platform).cat(ee.String(var_reg)).cat(ee.String(periodo)).cat(ee.String(var_filtros)).getInfo();
+
+print ('Descripcion2', var_descripcion2);
+print('Superficie con nubes2: ', 'menor a 0.09', 'Hectáreas');
+
+Export.image.toDrive({
+  image: compositeClipT0mdf2,
+  description:'L7_Region_T1',
+  scale:30,
+  crs: "EPSG: 32718",
+  //crs: "EPSG: 4326", // Si al exportar el mosaico existe un bandeo vertical probar exportando con este EPSG.
+  region:reg2,
+  maxPixels: 7e10,
+  skipEmptyTiles: true
+});
+
+
+// ii) Si presenta pixeles "masked" o sin informacion -> continuar con script
+
+}else{
+
+Export.image.toDrive({
+  image: compositeClipT0mdf2,
+  description:'L7_Region_T1',
+  scale:30,
+  crs: "EPSG: 32718",
+  //crs: "EPSG: 4326", // Si al exportar el mosaico existe un bandeo vertical probar exportando con este EPSG.
+  region:reg2,
+  maxPixels: 7e10,
+  skipEmptyTiles: true
+
+
+});
+
+print('Superficie cubierta por nubes T1: ', area_ha2, 'Hectáreas');
+print('% cubierto por nubes T1: ',  area_ha2.divide(geoArea2).multiply(100), 'Hectáreas');
+
+
+} 
+//Cálculo ndvi y nbr T1
+ var ndvi2 = compositeClipT0mdf2.normalizedDifference (['B5', 'B4']);
+ var nbr2 = compositeClipT0mdf2.normalizedDifference(['B5','B7']);
+
+ //Cálculo dNDVI
+ var dndvi = ndvi2.subtract(ndvi1);
+ var dnbr = nbr2.subtract(nbr1);
+
+
+//Visualizacion
+var bdif_palette = ['FF0000','00FF00'];
+Map.addLayer(dndvi,
+{min: -1, max: 1, palette: bdif_palette}
+,'dNDVI_L8');
+
+//Visualizacion
+var bdif_palette = ['FF0000','00FF00'];
+Map.addLayer(dnbr,
+{min: -1, max: 1, palette: bdif_palette}
+,'dNBR_L8');
+
+//Exportacion
+Export.image.toDrive({
+image: dndvi,
+description: 'dNDVI_L7',
+scale: 30,
+region: reg2,
+maxPixels: 10e10,
+});
+
+//Exportacion
+Export.image.toDrive({
+image: dnbr,
+description: 'dNBR_L8',
+scale: 30,
+region: reg2,
+maxPixels: 10e10,
+});
+
+//histograma
+var hist = dnbr.reduceRegion({
+  reducer: ee.Reducer.autoHistogram(),
+  geometry: RM,
+  scale: 1000,
+  bestEffort: true,
+});
+
+var histArray = ee.Array(hist.get('nd'));
+print(histArray);
+
+var binBottom = histArray.slice(1, 0, 1).project([0]);
+var nPixels = histArray.slice(1, 1, null).project([0]);
+var histColumnFromArray = ui.Chart.array.values({
+  array:nPixels,
+  axis: 0,
+  xLabels: binBottom})
+  .setChartType('ColumnChart');
+print(histColumnFromArray);
+
